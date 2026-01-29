@@ -15,40 +15,22 @@
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
 
 from starlette.endpoints import WebSocketEndpoint
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket
 
-import psycopg
-from jose import jwt
-from psycopg.rows import dict_row
 from redis.asyncio import Redis
 
 from . import COMMON_CHANNEL
+from .utils import UserError, get_user_from_token_async
 
-
-if TYPE_CHECKING:
-    from .models_abstract import UserWsMixin
 
 logger = logging.getLogger()
-User = get_user_model()
-
-
-db_settings = settings.DATABASES["default"]
-
-psycopg3_params = {
-    "host": db_settings.get("HOST", "localhost"),
-    "port": db_settings.get("PORT", 5432),
-    "dbname": db_settings.get("NAME"),
-    "user": db_settings.get("USER"),
-    "password": db_settings.get("PASSWORD"),
-}
 
 redis = Redis.from_url(settings.CACHES['default']['LOCATION'])
 
@@ -59,12 +41,16 @@ class WsError(Exception):
 
 class WsEndpoint(WebSocketEndpoint):
     encoding = 'json'
-    user: Optional['UserWsMixin'] = None
-    is_running: bool = False
+    session_key: str | None
+    channel_name: str | None
+    is_running: bool
 
     def __init__(self, scope, receive, send):
         super().__init__(scope, receive, send)
         self.active_tasks = []
+        self.session_key = None
+        self.channel_name = None
+        self.is_running = False
 
     async def on_connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -101,46 +87,46 @@ class WsEndpoint(WebSocketEndpoint):
         await self.session_stop(websocket)
         logger.info('WS:on_disconnect::finish')
 
-    async def get_user_from_token(self, token, websocket: WebSocket):
-        try:
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[getattr(settings, 'BAZIS_JWT_SESSION_ALG', 'HS256')])
-            username = payload.get('sub')
-        except jwt.ExpiredSignatureError:
-            await websocket.send_json({
-                'type': 'error',
-                'code': 'expired_token',
-                'detail': _('Token expired'),
-            })
-            logger.error(f'WS:error:jwt.ExpiredSignatureError: {token}')
-            return None
-
-        logger.info(f'WS:get_user_from_token:username: {username}')
-
-        async with await psycopg.AsyncConnection.connect(**psycopg3_params, row_factory=dict_row) as aconn:
-            async with aconn.cursor() as acur:
-                await acur.execute(f'SELECT * FROM {User._meta.db_table} WHERE username=%s', (username,))
-                result = await acur.fetchone()
-                if not result:
-                    await websocket.send_json({
-                        'type': 'error',
-                        'code': 'user_not_found',
-                        'detail': _('User not found'),
-                    })
-                    logger.error(f'WS:get_user_from_token:User not found: {username}')
-                    return None
-        return User(**result)
-
     async def session_start(self, websocket: WebSocket, token: str):
         await self.session_stop(websocket)
 
-        self.user = await self.get_user_from_token(token, websocket)
-        logger.info(f'WS:session_start:username: {self.user}')
-        if self.user:
-            self.is_running = True
-            task = asyncio.create_task(self.task_online_update())
-            self.active_tasks.append(task)
-            task = asyncio.create_task(self.task_listen_queue(websocket))
-            self.active_tasks.append(task)
+        if token.count('.') == 2:
+            try:
+                user = await get_user_from_token_async(token)
+            except UserError as exc:
+                await websocket.send_json(
+                    {
+                        'type': 'error',
+                        'code': exc.code,
+                        'detail': exc.message,
+                    }
+                )
+                logger.info(f'WS:session_start:error: {exc.message}')
+                return
+            except Exception as exc:
+                await websocket.send_json(
+                    {
+                        'type': 'error',
+                        'code': 'internal_error',
+                        'detail': _('Internal server error'),
+                    }
+                )
+                logger.error(f'WS:session_start:error: {exc}')
+                return
+
+            logger.info(f'WS:session_start:username: {user}')
+            self.session_key = user.ws_session
+            self.channel_name = user.user_channel
+        else:
+            logger.info(f'WS:session_start:token: {token}')
+            self.session_key = f'{token}:session'
+            self.channel_name = token
+
+        self.is_running = True
+        task = asyncio.create_task(self.task_online_update())
+        self.active_tasks.append(task)
+        task = asyncio.create_task(self.task_listen_queue(websocket))
+        self.active_tasks.append(task)
 
     async def session_stop(self, websocket: WebSocket, code: int | None = None):
         self.is_running = False
@@ -149,16 +135,15 @@ class WsEndpoint(WebSocketEndpoint):
             await asyncio.gather(*self.active_tasks, return_exceptions=True)
             self.active_tasks = []
 
-        if self.user:
-            await redis.delete(self.user.ws_session)
-            self.user = None
+        if self.session_key:
+            await redis.delete(self.session_key)
+        self.session_key = None
+        self.channel_name = None
 
         if code:
             await websocket.close(code)
 
     def running_check(self):
-        if not self.user:
-            raise WsError('WS: User not found')
         if not self.is_running:
             raise WsError('WS: Session not running')
 
@@ -172,7 +157,7 @@ class WsEndpoint(WebSocketEndpoint):
         logger.info('WS:task_online_update::start')
         try:
             while self.running_check():
-                await redis.set(self.user.ws_session, '1', ex=10)
+                await redis.set(self.session_key, '1', ex=10)
                 # logger.info(f'WS:task_online_update::set: {ws_session_set}')
                 await asyncio.sleep(5)
         except Exception as e:
@@ -181,10 +166,10 @@ class WsEndpoint(WebSocketEndpoint):
         logger.info('WS:task_online_update::finish')
 
     async def task_listen_queue(self, websocket: WebSocket):
-        logger.info(f'WS:task_listen_queue::start {self.user.user_channel}')
+        logger.info(f'WS:task_listen_queue::start {self.channel_name}')
         try:
             async with redis.pubsub(ignore_subscribe_messages=True) as pubsub:
-                await pubsub.subscribe(self.user.user_channel, COMMON_CHANNEL)
+                await pubsub.subscribe(self.channel_name, COMMON_CHANNEL)
                 while self.running_check():
                     if message := await pubsub.get_message(timeout=1):
                         logger.info(f'WS:listen_queue::message::{message}')

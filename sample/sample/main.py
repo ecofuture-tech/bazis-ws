@@ -17,8 +17,9 @@ import os
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sample.settings')
 
-from bazis.core.app import app
 from bazis.contrib.ws.ws import ws_route
+from bazis.core.app import app
+
 
 app.router.routes.append(ws_route)
 

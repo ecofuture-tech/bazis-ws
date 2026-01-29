@@ -15,6 +15,7 @@
 import asyncio
 
 from django.contrib.auth import get_user_model
+
 from jose import jwt as jose_jwt
 
 from bazis.contrib.ws import WS_PREFIX
@@ -106,7 +107,7 @@ def test_ws_endpoint_token_triggers_session_start(monkeypatch):
 
 
 def test_ws_endpoint_expired_token(monkeypatch):
-    from bazis.contrib.ws import ws as ws_module
+    from bazis.contrib.ws import utils as utils_module
 
     endpoint = WsEndpoint(scope={'type': 'websocket'}, receive=None, send=None)
     websocket = DummyWebSocket()
@@ -114,9 +115,9 @@ def test_ws_endpoint_expired_token(monkeypatch):
     def fake_decode(*_args, **_kwargs):
         raise jose_jwt.ExpiredSignatureError()
 
-    monkeypatch.setattr(ws_module.jwt, 'decode', fake_decode)
+    monkeypatch.setattr(utils_module.jwt, 'decode', fake_decode)
 
-    result = asyncio.run(endpoint.get_user_from_token('expired', websocket))
+    result = asyncio.run(endpoint.session_start(websocket, 'expired.expired.expired'))
 
     assert result is None
     assert websocket.sent == [
