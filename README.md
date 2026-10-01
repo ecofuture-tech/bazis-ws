@@ -133,6 +133,13 @@ WebSocket endpoint with authentication and session management support.
 1. **JWT Token Authentication**:
    - On connection: `ws://api.example.com/ws?token=<jwt_token>`
    - During session: sending `{"token": "<jwt_token>"}`
+   - The token must be a valid, unexpired session token (`exp` and `sub` are required)
+     of an active user.
+
+   **Anonymous clients** send a token they generate themselves instead of a JWT:
+   16–128 characters `A-Z a-z 0-9 _ -` (e.g. a random UUID). The token is the only
+   secret protecting the channel, so it must be random. It subscribes to the channel
+   `user_ws:anon:<token>`, which can never be the channel of a user or the common channel.
 
 2. **Automatic Online Status Tracking**:
    - Status update every 5 seconds
@@ -200,6 +207,10 @@ WebSocket endpoint with authentication and session management support.
 - `user_ws:{user_id}` — user's personal channel
 - `user_ws:common` — common channel for all users
 - `user_ws:{user_id}:session` — active session key (TTL: 10 seconds)
+- `user_ws:anon:{token}` — channel of an anonymous client (and `...:session`, its session key)
+
+If Redis fails while a session is running, the server closes the socket with code `1011`
+so that the client reconnects.
 
 ## Usage
 
@@ -538,7 +549,9 @@ Authorization: Bearer <token>
 **Error Codes**:
 
 - `expired_token` — JWT token has expired
-- `user_not_found` — user not found in database
+- `invalid_token` — the JWT is invalid, or the anonymous token does not match the format
+- `user_not_found` — user not found in database or inactive
+- `internal_error` — the session could not be started
 
 ## Examples
 
