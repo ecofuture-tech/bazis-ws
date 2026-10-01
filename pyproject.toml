@@ -33,7 +33,7 @@ classifiers = [
     "Framework :: FastAPI",
 ]
 dependencies = [
-    "bazis>=2.3.0",
+    "bazis>=2.4.0",
     "PyJWT>=2.10",
     "psycopg>=3.2",
     "redis>=5.0",
