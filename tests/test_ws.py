@@ -313,3 +313,20 @@ def test_user_token_issued_in_the_future_accepted():
 
     token = _user_token('user', iat=now() + timedelta(seconds=5))
     assert decode_user_token(token)['sub'] == 'user'
+
+
+def test_redis_clients_of_closed_loops_are_dropped():
+    """
+    The asyncio Redis clients are kept per event loop; the clients of closed loops were
+    never released (a weak registry cannot release them: the client refers to its loop).
+    """
+    from bazis.contrib.ws import utils
+
+    async def client():
+        return utils.get_redis_async()
+
+    utils._redis_async_by_loop.clear()
+    first = asyncio.run(client())
+    second = asyncio.run(client())
+    assert first is not second
+    assert list(utils._redis_async_by_loop.values()) == [second]
