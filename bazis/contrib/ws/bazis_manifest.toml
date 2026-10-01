@@ -1,0 +1,48 @@
+# What the package is for and how to use it, for tools and AI agents (see AGENTS.md).
+# `import` paths and `check` ids are verified by tests/test_manifest.py.
+
+[package]
+name = "bazis-ws"
+summary = "WebSocket notifications over Redis pub/sub: user, anonymous and common channels"
+solves = [
+    "push messages from the server to a user's browser",
+    "push messages to anonymous clients identified by their own token",
+    "broadcast to all connected clients",
+    "know whether a user is online",
+]
+requires = ["bazis"]
+pairs_well = ["bazis-users", "bazis-async-background"]
+
+[[extension_points]]
+name = "UserWsMixin"
+import = "bazis.contrib.ws.models_abstract.UserWsMixin"
+use_when = "the user model: user_channel, ws_publish(), is_online"
+
+[[extension_points]]
+name = "ws_route"
+import = "bazis.contrib.ws.ws.ws_route"
+use_when = "register the socket: app.router.routes.append(ws_route) (path /ws)"
+
+[[extension_points]]
+name = "WsEndpoint"
+import = "bazis.contrib.ws.ws.WsEndpoint"
+use_when = "a socket with custom behavior (subclass it and register your own WebSocketRoute)"
+
+[[extension_points]]
+name = "get_anonymous_channel"
+import = "bazis.contrib.ws.utils.get_anonymous_channel"
+use_when = "the channel of an anonymous client from its token (validates the token)"
+
+[[extension_points]]
+name = "COMMON_CHANNEL"
+import = "bazis.contrib.ws.COMMON_CHANNEL"
+use_when = "publish to all connected clients"
+
+[[pitfalls]]
+text = "a channel built by hand from a client token can address a user channel: use get_anonymous_channel"
+
+[[pitfalls]]
+text = "published messages are delivered to clients as a JSON string in `data`, and are lost if nobody is subscribed"
+
+[[pitfalls]]
+text = "UserWsRouteSet imports bazis-users, which bazis-ws does not install"
