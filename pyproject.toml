@@ -33,12 +33,15 @@ classifiers = [
     "Framework :: FastAPI",
 ]
 dependencies = [
-    "bazis",
+    "bazis>=2.3.0",
+    "PyJWT>=2.10",
+    "psycopg>=3.2",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]
 test = [
-    "bazis-test-utils"
+    "bazis-test-utils>=2.3.0"
 ]
 dev = [
     "ruff"
