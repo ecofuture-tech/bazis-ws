@@ -70,7 +70,7 @@ app.router.routes.append(ws_route)
 - **PostgreSQL**: 12+
 - **Redis**: For pub/sub and caching
 - **Additional libraries**:
-  - `python-jose` — for JWT handling
+  - `PyJWT` — for JWT handling
   - `psycopg[binary]` — for asynchronous PostgreSQL access
   - `redis` — for Redis operations
 
@@ -98,8 +98,8 @@ Mixin for user model that adds WebSocket support.
 
 **Properties**:
 
-- `user_channel` — user's personal channel in Redis (format: `user_ws:{user_id}`)
-- `ws_session` — WebSocket session key in Redis (format: `user_ws:{user_id}:session`)
+- `user_channel` — user's personal channel in Redis (format: `user_ws::{user_id}`)
+- `ws_session` — WebSocket session key in Redis (format: `user_ws::{user_id}:session`)
 - `is_online` — boolean property indicating whether the user is connected to WebSocket
 
 **Methods**:
@@ -204,9 +204,9 @@ WebSocket endpoint with authentication and session management support.
 
 **Redis Channels**:
 
-- `user_ws:{user_id}` — user's personal channel
+- `user_ws::{user_id}` — user's personal channel
 - `user_ws:common` — common channel for all users
-- `user_ws:{user_id}:session` — active session key (TTL: 10 seconds)
+- `user_ws::{user_id}:session` — active session key (TTL: 10 seconds)
 - `user_ws:anon:{token}` — channel of an anonymous client (and `...:session`, its session key)
 
 If Redis fails while a session is running, the server closes the socket with code `1011`

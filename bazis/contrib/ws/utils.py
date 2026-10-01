@@ -15,7 +15,6 @@
 import asyncio
 import logging
 import re
-import weakref
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -41,9 +40,16 @@ ANONYMOUS_TOKEN_RE = re.compile(r'[A-Za-z0-9_-]{16,128}')
 #: address a user channel (`user_ws::<pk>`) or the common channel
 ANONYMOUS_CHANNEL_PREFIX = f'{WS_PREFIX}anon:'
 
-_redis_async_by_loop: 'weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, AsyncRedis]' = (
-    weakref.WeakKeyDictionary()
-)
+_redis_async_by_loop: dict[asyncio.AbstractEventLoop, AsyncRedis] = {}
+
+
+def drop_closed_loops(registry: dict) -> None:
+    """
+    Removes the objects of closed event loops from a per-loop registry: the objects refer to
+    their loop, so a weak registry would never release them.
+    """
+    for loop in [loop for loop in registry if loop.is_closed()]:
+        del registry[loop]
 
 
 class UserError(Exception):
@@ -61,6 +67,7 @@ def get_redis_async() -> AsyncRedis:
     loop = asyncio.get_running_loop()
     client = _redis_async_by_loop.get(loop)
     if client is None:
+        drop_closed_loops(_redis_async_by_loop)
         client = AsyncRedis.from_url(settings.CACHES['default']['LOCATION'])
         _redis_async_by_loop[loop] = client
     return client
@@ -162,7 +169,7 @@ async def get_user_from_token_async(token: str):
 
     query = sql.SQL('SELECT * FROM {table} WHERE {username} = %s AND {is_active}').format(
         table=sql.Identifier(User._meta.db_table),
-        username=sql.Identifier(User._meta.get_field(User.USERNAME_FIELD).column),
+        username=sql.Identifier(User._meta.get_field('username').column),
         is_active=sql.Identifier(User._meta.get_field('is_active').column),
     )
     async with await psycopg.AsyncConnection.connect(

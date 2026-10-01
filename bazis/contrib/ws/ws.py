@@ -129,8 +129,6 @@ class WsEndpoint(WebSocketEndpoint):
 
     async def session_stop(self, websocket: WebSocket, code: int | None = None):
         tasks, self.active_tasks = self.active_tasks, []
-        current = asyncio.current_task()
-        tasks = [task for task in tasks if task is not current]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
