@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import re
+import weakref
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -22,6 +23,7 @@ from django.contrib.auth import get_user_model
 import jwt
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from redis.asyncio import Redis as AsyncRedis
 
@@ -39,7 +41,9 @@ ANONYMOUS_TOKEN_RE = re.compile(r'[A-Za-z0-9_-]{16,128}')
 #: address a user channel (`user_ws::<pk>`) or the common channel
 ANONYMOUS_CHANNEL_PREFIX = f'{WS_PREFIX}anon:'
 
-_redis_async_by_loop: dict[int, AsyncRedis] = {}
+_redis_async_by_loop: 'weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, AsyncRedis]' = (
+    weakref.WeakKeyDictionary()
+)
 
 
 class UserError(Exception):
@@ -55,10 +59,10 @@ def get_redis_async() -> AsyncRedis:
     connections cannot be shared between event loops.
     """
     loop = asyncio.get_running_loop()
-    client = _redis_async_by_loop.get(id(loop))
+    client = _redis_async_by_loop.get(loop)
     if client is None:
         client = AsyncRedis.from_url(settings.CACHES['default']['LOCATION'])
-        _redis_async_by_loop[id(loop)] = client
+        _redis_async_by_loop[loop] = client
     return client
 
 
@@ -93,7 +97,9 @@ def decode_user_token(token: str) -> dict:
             token,
             settings.SECRET_KEY,
             algorithms=[algorithm],
-            options={'require': ['exp', 'sub']},
+            # iat is informational: checking it would reject tokens issued by a server
+            # whose clock is slightly ahead
+            options={'require': ['exp', 'sub'], 'verify_iat': False},
         )
     except jwt.ExpiredSignatureError:
         raise UserError(
@@ -107,22 +113,38 @@ def decode_user_token(token: str) -> dict:
         ) from None
 
 
+def _is_libpq_option(key: str, value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return False
+    try:
+        make_conninfo(**{key: value})
+    except psycopg.ProgrammingError:
+        return False
+    return True
+
+
 def _connection_params() -> dict:
+    """
+    The libpq parameters of the default database, as Django connects to it: empty values
+    are left to libpq (an empty HOST is the Unix socket), and of OPTIONS only libpq
+    parameters are passed (sslmode, sslrootcert, service, ...), not the options of the
+    Django backend (isolation_level, server_side_binding, pool, ...).
+    """
     db_settings = settings.DATABASES['default']
     params = {
-        'host': db_settings.get('HOST') or 'localhost',
-        'port': db_settings.get('PORT') or 5432,
+        'host': db_settings.get('HOST'),
+        'port': db_settings.get('PORT'),
         'dbname': db_settings.get('NAME'),
         'user': db_settings.get('USER'),
         'password': db_settings.get('PASSWORD'),
         'connect_timeout': 10,
     }
-    # libpq options of the Django connection (sslmode, sslrootcert, ...)
+    params = {key: value for key, value in params.items() if value not in (None, '')}
     params.update(
         {
             key: value
             for key, value in (db_settings.get('OPTIONS') or {}).items()
-            if isinstance(value, str | int | float)
+            if _is_libpq_option(key, value)
         }
     )
     return params

@@ -280,3 +280,36 @@ def test_ws_redis_failure_closes_socket(ws_client, monkeypatch):
         with pytest.raises(WebSocketDisconnect) as exc_info:
             websocket.receive_json()
         assert exc_info.value.code == 1011
+
+
+def test_connection_params(settings):
+    from bazis.contrib.ws.utils import _connection_params
+
+    settings.DATABASES = {
+        'default': {
+            'NAME': 'db',
+            'USER': 'user',
+            'PASSWORD': '',
+            'HOST': '',
+            'PORT': '',
+            'OPTIONS': {
+                'sslmode': 'require',
+                'server_side_binding': True,
+                'isolation_level': 1,
+                'pool': {'min_size': 2},
+            },
+        }
+    }
+    assert _connection_params() == {
+        'dbname': 'db',
+        'user': 'user',
+        'connect_timeout': 10,
+        'sslmode': 'require',
+    }
+
+
+def test_user_token_issued_in_the_future_accepted():
+    from bazis.contrib.ws.utils import decode_user_token
+
+    token = _user_token('user', iat=now() + timedelta(seconds=5))
+    assert decode_user_token(token)['sub'] == 'user'
