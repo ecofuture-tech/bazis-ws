@@ -14,10 +14,14 @@
 
 import asyncio
 from datetime import timedelta
+from importlib import import_module
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
+
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 import jwt
 import pytest
@@ -49,6 +53,7 @@ class DummyRedis:
 class DummyWebSocket:
     def __init__(self):
         self.sent = []
+        self.application_state = WebSocketState.CONNECTED
 
     async def send_json(self, data):
         self.sent.append(data)
@@ -72,15 +77,34 @@ def ws_client(sample_app):
     return get_api_client(sample_app).client
 
 
-def _wait_subscribed(redis_client, channel: str):
+def _receive_subscribed(websocket):
     """
-    Waits until the socket subscribed to the channel: a message published before is lost.
+    Waits for `{"type": "subscribed"}`: the messages published from then on are delivered.
+    It pings meanwhile, so that a server that sends no acknowledgement fails the test
+    instead of blocking it; each ping is answered with one pong.
     """
     for _ in range(100):
-        if redis_client.pubsub_numsub(channel)[0][1]:
+        websocket.send_json({'type': 'ping'})
+        message = websocket.receive_json()
+        if message == {'type': 'subscribed'}:
+            # the pong of the ping sent before the acknowledgement arrived
+            assert websocket.receive_json() == {'type': 'pong'}
             return
+        assert message == {'type': 'pong'}
         asyncio.run(asyncio.sleep(0.05))
-    raise AssertionError(f'nobody subscribed to {channel}')
+    raise AssertionError('the subscription was not acknowledged')
+
+
+def _assert_closed(websocket, code: int):
+    """
+    Checks that the server closed the socket with the code. It pings first: the server
+    ignores the messages it receives after it closed the socket, while a server that keeps
+    the socket open answers with a pong and fails the test instead of blocking it.
+    """
+    websocket.send_json({'type': 'ping'})
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        websocket.receive_json()
+    assert exc_info.value.code == code
 
 
 def test_user_ws_mixin_channels(monkeypatch):
@@ -190,6 +214,8 @@ def test_ws_user_token_rejected(ws_client, make_token, code):
     with ws_client.websocket_connect('/ws') as websocket:
         websocket.send_json({'token': make_token(user)})
         assert websocket.receive_json()['code'] == code
+        # the same token would be refused again: the socket is closed with the policy code
+        _assert_closed(websocket, 1008)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -203,6 +229,7 @@ def test_ws_inactive_user_rejected(ws_client):
             'code': 'user_not_found',
             'detail': 'User not found',
         }
+        _assert_closed(websocket, 1008)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -210,7 +237,7 @@ def test_ws_user_session(ws_client, redis_client):
     user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
 
     with ws_client.websocket_connect(f'/ws?token={_user_token(user.username)}') as websocket:
-        _wait_subscribed(redis_client, user.user_channel)
+        _receive_subscribed(websocket)
         assert user.is_online is True
 
         user.ws_publish({'value': 1})
@@ -233,30 +260,79 @@ def test_ws_user_session(ws_client, redis_client):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_ws_anonymous_token_cannot_address_user_channel(ws_client):
+    user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
+
+    with ws_client.websocket_connect('/ws') as websocket:
+        websocket.send_json({'token': user.user_channel})
+        assert websocket.receive_json()['code'] == 'invalid_token'
+        _assert_closed(websocket, 1008)
+
+
+@pytest.mark.django_db(transaction=True)
 def test_ws_anonymous_session(ws_client, redis_client):
     user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
     channel = get_anonymous_channel(ANONYMOUS_TOKEN)
+    # the default: anybody can open an anonymous session, so it does not receive the
+    # common channel
+    assert settings.BAZIS_WS_ANONYMOUS_COMMON_CHANNEL is False
 
     with ws_client.websocket_connect('/ws') as websocket:
-        # an anonymous client cannot subscribe to the channel of a user
-        websocket.send_json({'token': user.user_channel})
-        assert websocket.receive_json()['code'] == 'invalid_token'
-
         websocket.send_json({'token': ANONYMOUS_TOKEN})
-        _wait_subscribed(redis_client, channel)
+        _receive_subscribed(websocket)
         assert redis_client.get(f'{channel}:session') == b'1'
 
         user.ws_publish({'private': True})
+        redis_client.publish(COMMON_CHANNEL, 'for the users')
         redis_client.publish(channel, 'for the anonymous client')
-        # the message of the user channel is not delivered
+        # the messages of the user channel and of the common channel are not delivered
         assert websocket.receive_json() == {'type': 'data', 'data': 'for the anonymous client'}
 
         # a new token replaces the session
         other_token = 'other-anonymous-token-0123'
         websocket.send_json({'token': other_token})
-        _wait_subscribed(redis_client, get_anonymous_channel(other_token))
+        _receive_subscribed(websocket)
         assert redis_client.pubsub_numsub(channel)[0][1] == 0
         assert redis_client.get(f'{channel}:session') is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_ws_anonymous_session_common_channel_allowed(ws_client, redis_client, settings):
+    settings.BAZIS_WS_ANONYMOUS_COMMON_CHANNEL = True
+
+    with ws_client.websocket_connect(f'/ws?token={ANONYMOUS_TOKEN}') as websocket:
+        _receive_subscribed(websocket)
+        redis_client.publish(COMMON_CHANNEL, 'for everybody')
+        assert websocket.receive_json() == {'type': 'data', 'data': 'for everybody'}
+
+
+def test_ws_session_start_failure_closes_socket(ws_client, monkeypatch):
+    """
+    A session that failed to start receives nothing: the socket is closed with code 1011,
+    so that the client reconnects.
+    """
+    from bazis.contrib.ws import ws as ws_module
+
+    def broken(_token):
+        raise RuntimeError('broken')
+
+    monkeypatch.setattr(ws_module, 'get_anonymous_channel', broken)
+
+    with ws_client.websocket_connect(f'/ws?token={ANONYMOUS_TOKEN}') as websocket:
+        assert websocket.receive_json()['code'] == 'internal_error'
+        _assert_closed(websocket, 1011)
+
+
+def test_ws_route_in_router_module():
+    """
+    The socket is registered in the router module, which tools import (not the main module).
+    """
+    router = import_module(settings.BAZIS_ROUTER_MODULE).router
+    assert [
+        route.path
+        for route in router.routes
+        if isinstance(route, WebSocketRoute) and route.endpoint is WsEndpoint
+    ] == ['/ws']
 
 
 def test_ws_redis_failure_closes_socket(ws_client, monkeypatch):

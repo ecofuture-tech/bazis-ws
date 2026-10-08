@@ -7,7 +7,7 @@ summary = "WebSocket notifications over Redis pub/sub: user, anonymous and commo
 solves = [
     "push messages from the server to a user's browser",
     "push messages to anonymous clients identified by their own token",
-    "broadcast to all connected clients",
+    "tell all user sessions that a resource changed (the common channel)",
     "know whether a user is online",
 ]
 requires = ["bazis"]
@@ -21,7 +21,7 @@ use_when = "the user model: user_channel, ws_publish(), is_online"
 [[extension_points]]
 name = "ws_route"
 import = "bazis.contrib.ws.ws.ws_route"
-use_when = "register the socket: app.router.routes.append(ws_route) (path /ws)"
+use_when = "register the socket in the router module (BS_BAZIS_ROUTER_MODULE): router.routes.append(ws_route) (path /ws)"
 
 [[extension_points]]
 name = "WsEndpoint"
@@ -36,7 +36,7 @@ use_when = "the channel of an anonymous client from its token (validates the tok
 [[extension_points]]
 name = "COMMON_CHANNEL"
 import = "bazis.contrib.ws.COMMON_CHANNEL"
-use_when = "publish to all connected clients"
+use_when = "publish {\"resource\": \"<type>\"} (no ids) to all user sessions"
 
 [[pitfalls]]
 text = "a channel built by hand from a client token can address a user channel: use get_anonymous_channel"
@@ -46,3 +46,12 @@ text = "published messages are delivered to clients as a JSON string in `data`, 
 
 [[pitfalls]]
 text = "UserWsRouteSet imports bazis-users, which bazis-ws does not install"
+
+[[pitfalls]]
+text = "the common channel reaches every user session (and every anonymous session with BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true): publish there only {\"resource\": \"<type>\"}, the ids and the notifications only with user.ws_publish"
+
+[[pitfalls]]
+text = "ws_route appended to the app in the main module works at runtime, but tools (the contract export of bazis-front) import the router module and do not see it: append it to the router of BS_BAZIS_ROUTER_MODULE"
+
+[[pitfalls]]
+text = "the socket is closed after an error: 1008 for a refused token (do not retry with it), 1011 for a server failure (reconnect with backoff); wait for {\"type\": \"subscribed\"} before relying on delivery"

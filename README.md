@@ -24,11 +24,12 @@ class User(UserWsMixin, JsonApiMixin, AbstractUser):
         verbose_name = 'User'
         verbose_name_plural = 'Users'
 
-# Register WebSocket route
-from bazis.core.app import app
+# Register the WebSocket route in the router module of the project (BS_BAZIS_ROUTER_MODULE)
 from bazis.contrib.ws.ws import ws_route
+from bazis.core.routing import BazisRouter
 
-app.router.routes.append(ws_route)
+router = BazisRouter(prefix='/api/v1')
+router.routes.append(ws_route)  # appended as it is, the route keeps its path: /ws
 ```
 
 ## Table of Contents
@@ -59,7 +60,8 @@ app.router.routes.append(ws_route)
 - **Redis Pub/Sub** — messaging system between servers and clients
 - **Online Status Tracking** — automatic detection of online/offline users
 - **Personal Channels** — each user has their own channel for receiving messages
-- **Common Channel** — for broadcasting messages to all connected users
+- **Common Channel** — for broadcasting messages to all connected users (not to anonymous
+  sessions unless `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true`)
 
 **This package requires installation of `bazis` and a running Redis server.**
 
@@ -138,16 +140,22 @@ WebSocket endpoint with authentication and session management support.
 
    **Anonymous clients** send a token they generate themselves instead of a JWT:
    16–128 characters `A-Z a-z 0-9 _ -` (e.g. a random UUID). The token is the only
-   secret protecting the channel, so it must be random. It subscribes to the channel
+   secret protecting the channel: anybody who knows it receives its messages, so it must
+   come from a cryptographic random source (`crypto.randomUUID()`) and never be shared. It subscribes to the channel
    `user_ws:anon:<token>`, which can never be the channel of a user or the common channel.
+   Anybody can open an anonymous session, so by default it does not receive the common
+   channel (see [Common Channel](#common-channel)).
 
 2. **Automatic Online Status Tracking**:
    - Status update every 5 seconds
    - Redis entry TTL: 10 seconds
 
 3. **Channel Subscription**:
-   - User's personal channel
-   - Common channel for all users
+   - User's personal channel (or the channel of the anonymous token)
+   - Common channel: user sessions; anonymous sessions only with
+     `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true`
+   - `{"type": "subscribed"}` is sent once the subscription is active: the messages
+     published from then on are delivered (pub/sub keeps nothing published before)
 
 4. **Ping/Pong**:
    - Client sends `{"type": "ping"}`
@@ -205,12 +213,14 @@ WebSocket endpoint with authentication and session management support.
 **Redis Channels**:
 
 - `user_ws::{user_id}` — user's personal channel
-- `user_ws:common` — common channel for all users
+- `user_ws:common` — common channel of the user sessions (and of the anonymous sessions
+  with `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true`)
 - `user_ws::{user_id}:session` — active session key (TTL: 10 seconds)
 - `user_ws:anon:{token}` — channel of an anonymous client (and `...:session`, its session key)
 
-If Redis fails while a session is running, the server closes the socket with code `1011`
-so that the client reconnects.
+A session that cannot run closes the socket (see [Close Codes](#close-codes)): code `1008`
+after a refused token, code `1011` when the server fails (the session start, or Redis
+while the session is running) so that the client reconnects.
 
 ## Usage
 
@@ -241,15 +251,26 @@ class UserRouteSet(UserWsRouteSet):
     model = apps.get_model('myapp.User')
 ```
 
-**3. Register WebSocket route**:
+**3. Register WebSocket route** in the router module of the project, the module of
+`BS_BAZIS_ROUTER_MODULE`:
 
 ```python
-# main.py or app.py
-from bazis.core.app import app
+# router.py
 from bazis.contrib.ws.ws import ws_route
+from bazis.core.routing import BazisRouter
 
-app.router.routes.append(ws_route)
+router = BazisRouter(prefix='/api/v1')
+router.routes.append(ws_route)  # appended as it is, the route keeps its path: /ws
+
+router.register('myapp.router')
 ```
+
+`ws_route` is a Starlette `WebSocketRoute`, not a `BazisRouter` route: appended to the
+routes of the root router, it keeps its path `/ws` (the prefix of the router is not applied),
+and `bazis.core.app` includes it with the router. Tools import the router module, not the
+main module of the project: the contract export of bazis-front finds the socket there.
+Appending the route to `app.router.routes` in the main module also works at runtime, but
+the tools do not see it.
 
 ### Connecting to WebSocket
 
@@ -283,10 +304,12 @@ class WebSocketClient {
       console.error('WebSocket error:', error);
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (event) => {
       console.log('WebSocket disconnected');
       this.stopPing();
-      // Reconnect
+      // 1008: the token was refused, the same token would be refused again
+      if (event.code === 1008) return;
+      // Reconnect (use a growing delay in production)
       setTimeout(() => this.connect(), this.reconnectInterval);
     };
   }
@@ -296,12 +319,17 @@ class WebSocketClient {
       case 'pong':
         console.log('Received pong');
         break;
+      case 'subscribed':
+        // the messages published from now on are delivered: refetch what may have changed
+        console.log('Subscribed');
+        break;
       case 'data':
         console.log('Received data:', data.data);
         // Process received data
         this.onData(data.data);
         break;
       case 'error':
+        // the server closes the socket after it: 1008 (a refused token) or 1011
         console.error('Error:', data.code, data.detail);
         break;
       default:
@@ -373,6 +401,8 @@ async def websocket_client(url, token):
                 
                 if data['type'] == 'pong':
                     print("Received pong")
+                elif data['type'] == 'subscribed':
+                    print("Subscribed")
                 elif data['type'] == 'data':
                     print(f"Received data: {data['data']}")
                 elif data['type'] == 'error':
@@ -429,24 +459,36 @@ def notify_user_async(user_id, notification_data):
         pass
 ```
 
-#### Broadcasting to All Online Users
+#### Common Channel
+
+The common channel `user_ws:common` (`bazis.contrib.ws.COMMON_CHANNEL`) reaches every user
+session, whatever the user may see. Publish there only what every user may know: that a
+resource changed, `{"resource": "<JSON:API type>"}`, without the id of the item (the format
+of bazis-front, whose pages then refetch the resource with their own permissions). Send the
+ids, the notifications and any data of an item only to the users who may see it,
+with `user.ws_publish(...)`.
 
 ```python
-from redis import Redis
-from django.conf import settings
 import json
+
+from django.conf import settings
+
+from redis import Redis
+
+from bazis.contrib.ws import COMMON_CHANNEL
 
 redis = Redis.from_url(settings.CACHES['default']['LOCATION'])
 
-def broadcast_message(message):
-    """Send message to all connected users"""
-    from bazis.contrib.ws import COMMON_CHANNEL
-    
-    redis.publish(COMMON_CHANNEL, json.dumps({
-        'type': 'broadcast',
-        'message': message
-    }))
+def resource_changed(resource: str):
+    """Tell all user sessions that a resource changed"""
+    redis.publish(COMMON_CHANNEL, json.dumps({'resource': resource}))
 ```
+
+Anonymous sessions do not receive the common channel: an anonymous token is generated by
+the client, so anybody can open such a session. Set
+`BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true` only if what the project publishes on the
+common channel is public (for example, pages that anonymous visitors see refresh on the
+`{"resource"}` messages).
 
 ### Checking Online Status
 
@@ -515,6 +557,17 @@ Authorization: Bearer <token>
 
 ### Messages from Server
 
+#### Subscribed
+
+Sent once the subscription of the session is active (after each accepted token): the
+messages published from then on are delivered.
+
+```json
+{
+  "type": "subscribed"
+}
+```
+
 #### Pong
 
 ```json
@@ -525,14 +578,12 @@ Authorization: Bearer <token>
 
 #### Data
 
+`data` is the published message as a JSON string, decoded by the client:
+
 ```json
 {
   "type": "data",
-  "data": {
-    "type": "notification",
-    "title": "New Message",
-    "message": "You have a new message from admin"
-  }
+  "data": "{\"type\": \"notification\", \"title\": \"New Message\", \"message\": \"You have a new message from admin\"}"
 }
 ```
 
@@ -552,6 +603,18 @@ Authorization: Bearer <token>
 - `invalid_token` — the JWT is invalid, or the anonymous token does not match the format
 - `user_not_found` — user not found in database or inactive
 - `internal_error` — the session could not be started
+
+### Close Codes
+
+The server closes the socket of a session that cannot run, after the error message if
+there is one:
+
+- `1008` (policy violation) — the token was refused (`expired_token`, `invalid_token`,
+  `user_not_found`): connect again only with another token (a refreshed session token).
+- `1011` (internal error) — the session could not be started (`internal_error`), or Redis
+  failed while it was running: reconnect with a growing delay.
+
+The messages that the client sends after the server closed the socket are ignored.
 
 ## Examples
 
