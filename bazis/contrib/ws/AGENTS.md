@@ -73,13 +73,19 @@ events to browsers; bazis-async-background sends its task statuses through it.
   `user.ws_publish(...)`. With `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true` the common
   channel is public: enable it only if what the project publishes there is.
 - Pub/sub is not stored: a message published while the client is not subscribed is lost.
-- From a write (a hook of a route, `validate_item`, a transit: inside the transaction of
-  the request) publish after the commit, robustly: a client that refetched before the
-  commit would read the old data, a rolled back write must not notify, and Redis down
-  must not fail a committed write (Django logs the error):
+- From a write (`hook_after_create`, `hook_after_update`, the relationships hooks, an
+  action of a transit: inside the transaction of the request) publish after the commit,
+  robustly: a client that refetched before the commit would read the old data, a rolled
+  back write must not notify, and Redis down must not fail a committed write (Django logs
+  the error). Not from `validate_item`: it may run more than once for one write. Bind the
+  values when the callback is made (`functools.partial`), not in a closure over a loop
+  variable, or every callback publishes the last one:
 
   ```python
-  transaction.on_commit(lambda: user.ws_publish(message), robust=True)
+  from functools import partial
+
+  for user in recipients:
+      transaction.on_commit(partial(user.ws_publish, message_for(user)), robust=True)
   ```
 
 - A notification of bazis-front (`@/bazis/react/ws`) to the users who may see the item:

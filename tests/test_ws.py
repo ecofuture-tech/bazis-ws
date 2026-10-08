@@ -412,8 +412,11 @@ def test_redis_clients_of_closed_loops_are_dropped():
 def test_publish_after_the_commit(monkeypatch):
     """
     The pattern of AGENTS.md: a write publishes after its commit, never for a rollback,
-    and a failure of Redis does not fail the committed write.
+    and a failure of Redis does not fail the committed write; the values are bound when
+    the callbacks are made (partial), one message per recipient.
     """
+    from functools import partial
+
     from django.db import transaction
 
     from bazis.contrib.ws import models_abstract
@@ -440,3 +443,16 @@ def test_publish_after_the_commit(monkeypatch):
     monkeypatch.setattr(dummy_redis, 'publish', fail)
     with transaction.atomic():
         transaction.on_commit(lambda: user.ws_publish(message), robust=True)
+
+    monkeypatch.setattr(dummy_redis, 'publish', DummyRedis.publish.__get__(dummy_redis))
+    dummy_redis.published.clear()
+    recipients = [get_user_model()(pk=pk, username=f'u{pk}') for pk in (1, 2)]
+    with transaction.atomic():
+        for recipient in recipients:
+            transaction.on_commit(
+                partial(recipient.ws_publish, {'id': str(recipient.pk)}), robust=True
+            )
+    assert dummy_redis.published == [
+        (recipients[0].user_channel, '{"id": "1"}'),
+        (recipients[1].user_channel, '{"id": "2"}'),
+    ]
