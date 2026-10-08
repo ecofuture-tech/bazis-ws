@@ -2,12 +2,14 @@
 
 WebSocket notifications for Bazis: `WsEndpoint` delivers the messages of Redis channels
 to connected clients (user channels authenticated by the session JWT, anonymous channels
-identified by a client-generated token, and a common channel); `UserWsMixin` adds the
-user channel, the online flag and `ws_publish` to the user model.
+identified by a client-generated token, and the common channel of the user sessions);
+`UserWsMixin` adds the user channel, the online flag and `ws_publish` to the user model.
 
 Security: an anonymous token must never be able to address a user channel. Anonymous
 channels live under `user_ws:anon:` (see `bazis/contrib/ws/utils.py`), and
-bazis-async-background relies on the same functions for its task results.
+bazis-async-background relies on the same functions for its task results. Anybody can open
+an anonymous session, so it does not receive the common channel unless the project sets
+`BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true` (`bazis/contrib/ws/conf.py`).
 
 The package code is in `bazis/contrib/ws`, the sample project used by the tests is in `sample/`,
 the tests are in `tests/`.

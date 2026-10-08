@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from bazis.contrib.ws.ws import ws_route
 from bazis.core.routing import BazisRouter
 
 
 router = BazisRouter(prefix='/api/v1')
+# the socket is registered in the router module (BS_BAZIS_ROUTER_MODULE), which tools such as
+# the contract export of bazis-front import; appended as it is, it keeps its path `/ws`
+router.routes.append(ws_route)
 
 router.register('entity.router')
