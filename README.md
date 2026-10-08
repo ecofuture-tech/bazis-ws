@@ -140,7 +140,8 @@ WebSocket endpoint with authentication and session management support.
 
    **Anonymous clients** send a token they generate themselves instead of a JWT:
    16–128 characters `A-Z a-z 0-9 _ -` (e.g. a random UUID). The token is the only
-   secret protecting the channel, so it must be random. It subscribes to the channel
+   secret protecting the channel: anybody who knows it receives its messages, so it must
+   come from a cryptographic random source (`crypto.randomUUID()`) and never be shared. It subscribes to the channel
    `user_ws:anon:<token>`, which can never be the channel of a user or the common channel.
    Anybody can open an anonymous session, so by default it does not receive the common
    channel (see [Common Channel](#common-channel)).
@@ -577,14 +578,12 @@ messages published from then on are delivered.
 
 #### Data
 
+`data` is the published message as a JSON string, decoded by the client:
+
 ```json
 {
   "type": "data",
-  "data": {
-    "type": "notification",
-    "title": "New Message",
-    "message": "You have a new message from admin"
-  }
+  "data": "{\"type\": \"notification\", \"title\": \"New Message\", \"message\": \"You have a new message from admin\"}"
 }
 ```
 
