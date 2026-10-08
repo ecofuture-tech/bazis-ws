@@ -406,3 +406,37 @@ def test_redis_clients_of_closed_loops_are_dropped():
     second = asyncio.run(client())
     assert first is not second
     assert list(utils._redis_async_by_loop.values()) == [second]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_publish_after_the_commit(monkeypatch):
+    """
+    The pattern of AGENTS.md: a write publishes after its commit, never for a rollback,
+    and a failure of Redis does not fail the committed write.
+    """
+    from django.db import transaction
+
+    from bazis.contrib.ws import models_abstract
+
+    dummy_redis = DummyRedis()
+    monkeypatch.setattr(models_abstract, 'redis', dummy_redis)
+    user = get_user_model()(pk=7, username='tester')
+    message = {'resource': 'entity.parent_entity'}
+
+    with transaction.atomic():
+        transaction.on_commit(lambda: user.ws_publish(message), robust=True)
+        assert dummy_redis.published == []
+    assert dummy_redis.published == [(user.user_channel, '{"resource": "entity.parent_entity"}')]
+
+    dummy_redis.published.clear()
+    with pytest.raises(RuntimeError), transaction.atomic():
+        transaction.on_commit(lambda: user.ws_publish(message), robust=True)
+        raise RuntimeError('rolled back')
+    assert dummy_redis.published == []
+
+    def fail(channel, payload):
+        raise ConnectionError('Redis is down')
+
+    monkeypatch.setattr(dummy_redis, 'publish', fail)
+    with transaction.atomic():
+        transaction.on_commit(lambda: user.ws_publish(message), robust=True)

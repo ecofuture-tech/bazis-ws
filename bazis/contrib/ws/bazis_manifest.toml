@@ -55,3 +55,6 @@ text = "ws_route appended to the app in the main module works at runtime, but to
 
 [[pitfalls]]
 text = "the socket is closed after an error: 1008 for a refused token (do not retry with it), 1011 for a server failure (reconnect with backoff); wait for {\"type\": \"subscribed\"} before relying on delivery"
+
+[[pitfalls]]
+text = "publishing inside the transaction of a write notifies before the commit (and also for a write rolled back): publish with transaction.on_commit(lambda: user.ws_publish(message), robust=True)"

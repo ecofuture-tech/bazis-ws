@@ -73,6 +73,20 @@ events to browsers; bazis-async-background sends its task statuses through it.
   `user.ws_publish(...)`. With `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true` the common
   channel is public: enable it only if what the project publishes there is.
 - Pub/sub is not stored: a message published while the client is not subscribed is lost.
+- From a write (a hook of a route, `validate_item`, a transit: inside the transaction of
+  the request) publish after the commit, robustly: a client that refetched before the
+  commit would read the old data, a rolled back write must not notify, and Redis down
+  must not fail a committed write (Django logs the error):
+
+  ```python
+  transaction.on_commit(lambda: user.ws_publish(message), robust=True)
+  ```
+
+- A notification of bazis-front (`@/bazis/react/ws`) to the users who may see the item:
+  `{"action": "notification", "title": ..., "text": ..., "resource": "<JSON:API type>",
+  "id": "<id>"}`. Build its texts in the language of each user before `on_commit`, with
+  `str()` of the lazy strings inside `translation.override(user.language or
+  settings.LANGUAGE_CODE)` (`language` of `UserLanguageMixin` of bazis-users).
 
 ## Rules
 
