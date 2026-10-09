@@ -3,7 +3,10 @@
 WebSocket notifications for Bazis: `WsEndpoint` delivers the messages of Redis channels
 to connected clients (user channels authenticated by the session JWT, anonymous channels
 identified by a client-generated token, and the common channel of the user sessions);
-`UserWsMixin` adds the user channel, the online flag and `ws_publish` to the user model.
+`UserWsMixin` adds the user channel, the online flag and `ws_publish` to the user model;
+`bazis.contrib.ws.messages` publishes the messages of bazis-front from a write after the
+commit (`notify` in the language of each user, `publish_changed`), and the project registers
+the socket with `router.register('bazis.contrib.ws.router')`.
 
 Security: an anonymous token must never be able to address a user channel. Anonymous
 channels live under `user_ws:anon:` (see `bazis/contrib/ws/utils.py`), and

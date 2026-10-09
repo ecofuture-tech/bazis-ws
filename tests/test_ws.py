@@ -20,6 +20,8 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 
+from fastapi import FastAPI
+
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
@@ -35,6 +37,9 @@ from bazis.contrib.ws.ws import WsEndpoint
 
 
 ANONYMOUS_TOKEN = 'anonymous-token-0123456789'
+#: the socket registered with `router.register('bazis.contrib.ws.router')` under the prefix of
+#: the router module of the sample
+WS_PATH = '/api/v1/ws'
 
 
 class DummyRedis:
@@ -211,7 +216,7 @@ def test_anonymous_channel_namespace():
 @pytest.mark.django_db(transaction=True)
 def test_ws_user_token_rejected(ws_client, make_token, code):
     user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
-    with ws_client.websocket_connect('/ws') as websocket:
+    with ws_client.websocket_connect(WS_PATH) as websocket:
         websocket.send_json({'token': make_token(user)})
         assert websocket.receive_json()['code'] == code
         # the same token would be refused again: the socket is closed with the policy code
@@ -223,7 +228,7 @@ def test_ws_inactive_user_rejected(ws_client):
     user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
     user.is_active = False
     user.save()
-    with ws_client.websocket_connect(f'/ws?token={_user_token(user.username)}') as websocket:
+    with ws_client.websocket_connect(f'{WS_PATH}?token={_user_token(user.username)}') as websocket:
         assert websocket.receive_json() == {
             'type': 'error',
             'code': 'user_not_found',
@@ -236,7 +241,7 @@ def test_ws_inactive_user_rejected(ws_client):
 def test_ws_user_session(ws_client, redis_client):
     user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
 
-    with ws_client.websocket_connect(f'/ws?token={_user_token(user.username)}') as websocket:
+    with ws_client.websocket_connect(f'{WS_PATH}?token={_user_token(user.username)}') as websocket:
         _receive_subscribed(websocket)
         assert user.is_online is True
 
@@ -263,7 +268,7 @@ def test_ws_user_session(ws_client, redis_client):
 def test_ws_anonymous_token_cannot_address_user_channel(ws_client):
     user = get_user_model().objects.create_user('ws_user', password='weak_password_1')
 
-    with ws_client.websocket_connect('/ws') as websocket:
+    with ws_client.websocket_connect(WS_PATH) as websocket:
         websocket.send_json({'token': user.user_channel})
         assert websocket.receive_json()['code'] == 'invalid_token'
         _assert_closed(websocket, 1008)
@@ -277,7 +282,7 @@ def test_ws_anonymous_session(ws_client, redis_client):
     # common channel
     assert settings.BAZIS_WS_ANONYMOUS_COMMON_CHANNEL is False
 
-    with ws_client.websocket_connect('/ws') as websocket:
+    with ws_client.websocket_connect(WS_PATH) as websocket:
         websocket.send_json({'token': ANONYMOUS_TOKEN})
         _receive_subscribed(websocket)
         assert redis_client.get(f'{channel}:session') == b'1'
@@ -300,7 +305,7 @@ def test_ws_anonymous_session(ws_client, redis_client):
 def test_ws_anonymous_session_common_channel_allowed(ws_client, redis_client, settings):
     settings.BAZIS_WS_ANONYMOUS_COMMON_CHANNEL = True
 
-    with ws_client.websocket_connect(f'/ws?token={ANONYMOUS_TOKEN}') as websocket:
+    with ws_client.websocket_connect(f'{WS_PATH}?token={ANONYMOUS_TOKEN}') as websocket:
         _receive_subscribed(websocket)
         redis_client.publish(COMMON_CHANNEL, 'for everybody')
         assert websocket.receive_json() == {'type': 'data', 'data': 'for everybody'}
@@ -318,21 +323,35 @@ def test_ws_session_start_failure_closes_socket(ws_client, monkeypatch):
 
     monkeypatch.setattr(ws_module, 'get_anonymous_channel', broken)
 
-    with ws_client.websocket_connect(f'/ws?token={ANONYMOUS_TOKEN}') as websocket:
+    with ws_client.websocket_connect(f'{WS_PATH}?token={ANONYMOUS_TOKEN}') as websocket:
         assert websocket.receive_json()['code'] == 'internal_error'
         _assert_closed(websocket, 1011)
 
 
-def test_ws_route_in_router_module():
+def _socket_paths(routes, prefix=''):
     """
-    The socket is registered in the router module, which tools import (not the main module).
+    The full paths of the sockets of WsEndpoint, with the prefixes of the included routers
+    (as the contract export of bazis-front finds them).
+    """
+    for route in routes:
+        if isinstance(route, WebSocketRoute):
+            if route.endpoint is WsEndpoint:
+                yield prefix + route.path
+        elif (router := getattr(route, 'original_router', None)) is not None:
+            context = getattr(route, 'include_context', None)
+            yield from _socket_paths(router.routes, prefix + (getattr(context, 'prefix', '') or ''))
+
+
+def test_ws_route_in_router_module(sample_app):
+    """
+    `router.register('bazis.contrib.ws.router')` in the router module, which tools import (not
+    the main module): the socket is routed under the prefix of the router.
     """
     router = import_module(settings.BAZIS_ROUTER_MODULE).router
-    assert [
-        route.path
-        for route in router.routes
-        if isinstance(route, WebSocketRoute) and route.endpoint is WsEndpoint
-    ] == ['/ws']
+    app = FastAPI()
+    app.include_router(router)
+    assert list(_socket_paths(app.routes)) == [WS_PATH]
+    assert list(_socket_paths(sample_app.routes)) == [WS_PATH]
 
 
 def test_ws_redis_failure_closes_socket(ws_client, monkeypatch):
@@ -352,7 +371,7 @@ def test_ws_redis_failure_closes_socket(ws_client, monkeypatch):
 
     monkeypatch.setattr(ws_module, 'get_redis_async', BrokenRedis)
 
-    with ws_client.websocket_connect(f'/ws?token={ANONYMOUS_TOKEN}') as websocket:
+    with ws_client.websocket_connect(f'{WS_PATH}?token={ANONYMOUS_TOKEN}') as websocket:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             websocket.receive_json()
         assert exc_info.value.code == 1011
@@ -406,53 +425,3 @@ def test_redis_clients_of_closed_loops_are_dropped():
     second = asyncio.run(client())
     assert first is not second
     assert list(utils._redis_async_by_loop.values()) == [second]
-
-
-@pytest.mark.django_db(transaction=True)
-def test_publish_after_the_commit(monkeypatch):
-    """
-    The pattern of AGENTS.md: a write publishes after its commit, never for a rollback,
-    and a failure of Redis does not fail the committed write; the values are bound when
-    the callbacks are made (partial), one message per recipient.
-    """
-    from functools import partial
-
-    from django.db import transaction
-
-    from bazis.contrib.ws import models_abstract
-
-    dummy_redis = DummyRedis()
-    monkeypatch.setattr(models_abstract, 'redis', dummy_redis)
-    user = get_user_model()(pk=7, username='tester')
-    message = {'resource': 'entity.parent_entity'}
-
-    with transaction.atomic():
-        transaction.on_commit(lambda: user.ws_publish(message), robust=True)
-        assert dummy_redis.published == []
-    assert dummy_redis.published == [(user.user_channel, '{"resource": "entity.parent_entity"}')]
-
-    dummy_redis.published.clear()
-    with pytest.raises(RuntimeError), transaction.atomic():
-        transaction.on_commit(lambda: user.ws_publish(message), robust=True)
-        raise RuntimeError('rolled back')
-    assert dummy_redis.published == []
-
-    def fail(channel, payload):
-        raise ConnectionError('Redis is down')
-
-    monkeypatch.setattr(dummy_redis, 'publish', fail)
-    with transaction.atomic():
-        transaction.on_commit(lambda: user.ws_publish(message), robust=True)
-
-    monkeypatch.setattr(dummy_redis, 'publish', DummyRedis.publish.__get__(dummy_redis))
-    dummy_redis.published.clear()
-    recipients = [get_user_model()(pk=pk, username=f'u{pk}') for pk in (1, 2)]
-    with transaction.atomic():
-        for recipient in recipients:
-            transaction.on_commit(
-                partial(recipient.ws_publish, {'id': str(recipient.pk)}), robust=True
-            )
-    assert dummy_redis.published == [
-        (recipients[0].user_channel, '{"id": "1"}'),
-        (recipients[1].user_channel, '{"id": "2"}'),
-    ]

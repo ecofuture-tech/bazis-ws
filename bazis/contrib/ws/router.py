@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+The socket of bazis-ws, for the router module of the project (BS_BAZIS_ROUTER_MODULE):
+`router.register('bazis.contrib.ws.router')`. It is routed under the prefix of the router
+(`/api/v1/ws` under `BazisRouter(prefix='/api/v1')`), where the tools that import the router
+module (the contract export of bazis-front) find it.
+"""
+
 from bazis.core.routing import BazisRouter
 
+from .ws import ws_route
 
-router = BazisRouter(prefix='/api/v1')
-# the socket of bazis-ws, under the prefix (/api/v1/ws): registered in the router module
-# (BS_BAZIS_ROUTER_MODULE), which tools such as the contract export of bazis-front import
-router.register('bazis.contrib.ws.router')
 
-router.register('entity.router')
+router = BazisRouter()
+router.routes.append(ws_route)

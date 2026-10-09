@@ -6,6 +6,7 @@ name = "bazis-ws"
 summary = "WebSocket notifications over Redis pub/sub: user, anonymous and common channels"
 solves = [
     "push messages from the server to a user's browser",
+    "notify users after the commit of a write, in the language of each user, in the format of bazis-front",
     "push messages to anonymous clients identified by their own token",
     "tell all user sessions that a resource changed (the common channel)",
     "know whether a user is online",
@@ -19,9 +20,29 @@ import = "bazis.contrib.ws.models_abstract.UserWsMixin"
 use_when = "the user model: user_channel, ws_publish(), is_online"
 
 [[extension_points]]
+name = "router"
+import = "bazis.contrib.ws.router.router"
+use_when = "register the socket in the router module (BS_BAZIS_ROUTER_MODULE): router.register('bazis.contrib.ws.router') (path <prefix>/ws)"
+
+[[extension_points]]
+name = "notify"
+import = "bazis.contrib.ws.messages.notify"
+use_when = "notify users after the commit: notify(users, lambda user: notification(...)), the message built in the language of each user"
+
+[[extension_points]]
+name = "notification"
+import = "bazis.contrib.ws.messages.notification"
+use_when = "the notification of bazis-front: notification(title, text, item)"
+
+[[extension_points]]
+name = "publish_changed"
+import = "bazis.contrib.ws.messages.publish_changed"
+use_when = "tell all user sessions after the commit that the resource of an item changed ({\"resource\": \"<type>\"}, no id)"
+
+[[extension_points]]
 name = "ws_route"
 import = "bazis.contrib.ws.ws.ws_route"
-use_when = "register the socket in the router module (BS_BAZIS_ROUTER_MODULE): router.routes.append(ws_route) (path /ws)"
+use_when = "a project that routes the socket itself (prefer router.register('bazis.contrib.ws.router'))"
 
 [[extension_points]]
 name = "WsEndpoint"
@@ -36,7 +57,7 @@ use_when = "the channel of an anonymous client from its token (validates the tok
 [[extension_points]]
 name = "COMMON_CHANNEL"
 import = "bazis.contrib.ws.COMMON_CHANNEL"
-use_when = "publish {\"resource\": \"<type>\"} (no ids) to all user sessions"
+use_when = "the common channel of the user sessions (publish there with publish_changed)"
 
 [[pitfalls]]
 text = "a channel built by hand from a client token can address a user channel: use get_anonymous_channel"
@@ -48,13 +69,13 @@ text = "published messages are delivered to clients as a JSON string in `data`, 
 text = "UserWsRouteSet imports bazis-users, which bazis-ws does not install"
 
 [[pitfalls]]
-text = "the common channel reaches every user session (and every anonymous session with BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true): publish there only {\"resource\": \"<type>\"}, the ids and the notifications only with user.ws_publish"
+text = "the common channel reaches every user session (and every anonymous session with BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true): publish there only publish_changed(item), the ids and the notifications only with notify to the users who may see the item"
 
 [[pitfalls]]
-text = "ws_route appended to the app in the main module works at runtime, but tools (the contract export of bazis-front) import the router module and do not see it: append it to the router of BS_BAZIS_ROUTER_MODULE"
+text = "ws_route appended to the app in the main module works at runtime, but tools (the contract export of bazis-front) import the router module and do not see it: router.register('bazis.contrib.ws.router') in the module of BS_BAZIS_ROUTER_MODULE"
 
 [[pitfalls]]
 text = "the socket is closed after an error: 1008 for a refused token (do not retry with it), 1011 for a server failure (reconnect with backoff); wait for {\"type\": \"subscribed\"} before relying on delivery"
 
 [[pitfalls]]
-text = "publishing inside the transaction of a write notifies before the commit (and also for a write rolled back): publish from the hooks of the write (not validate_item, which may run more than once) with transaction.on_commit(partial(user.ws_publish, message), robust=True), the values bound with functools.partial, not a closure over a loop variable"
+text = "user.ws_publish inside the transaction of a write notifies before the commit (and also for a write rolled back): use notify/publish_changed (after the commit, robust) from the hooks of the write, not from validate_item, which may run more than once"
