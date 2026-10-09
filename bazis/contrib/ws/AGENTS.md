@@ -1,10 +1,11 @@
 # bazis-ws — guide for AI agents
 
-WebSocket notifications for Bazis: clients connect to `/ws`, the server delivers to them
-the messages published to Redis channels (the channel of a user, the channel of an
-anonymous client, the common channel of the user sessions) and keeps an online flag per
-session. Use it to push
-events to browsers; bazis-async-background sends its task statuses through it.
+WebSocket notifications for Bazis: clients connect to the socket (`/api/v1/ws` under the
+prefix of the project router), the server delivers to them the messages published to Redis
+channels (the channel of a user, the channel of an anonymous client, the common channel of
+the user sessions) and keeps an online flag per session. Use it to push events to browsers:
+`notify` and `publish_changed` publish the messages of bazis-front after the commit;
+bazis-async-background sends its task statuses through it.
 
 ## Setup
 
@@ -22,22 +23,21 @@ events to browsers; bazis-async-background sends its task statuses through it.
       pass
   ```
 
-- Register the socket in the router module of the project (`BS_BAZIS_ROUTER_MODULE`). It
-  is a Starlette route, not a `BazisRouter` route: appended to the routes of the root
-  router, it keeps its path `/ws` without the API prefix, and `bazis.core.app` includes it
-  with the router:
+- Register the socket in the router module of the project (`BS_BAZIS_ROUTER_MODULE`), like
+  the routers of the apps; it is routed under the prefix of the router (`/api/v1/ws` here):
 
   ```python
-  from bazis.contrib.ws.ws import ws_route
   from bazis.core.routing import BazisRouter
 
   router = BazisRouter(prefix='/api/v1')
-  router.routes.append(ws_route)
+  router.register('bazis.contrib.ws.router')
   ```
 
   Tools import the router module, not the main module (the contract export of bazis-front
-  finds the socket there). `app.router.routes.append(ws_route)` in the main module works at
-  runtime, but the tools do not see the socket.
+  finds the socket and its path there; the frontend connects to that path). Do not append
+  `ws_route` by hand: `router.routes.append(ws_route)` (the path `/ws`, as before 2.6) still
+  works, `app.router.routes.append(ws_route)` in the main module works at runtime but the
+  tools do not see the socket.
 
 ## Protocol
 
@@ -62,37 +62,54 @@ events to browsers; bazis-async-background sends its task statuses through it.
 
 ## Publishing
 
-- To a user: `user.ws_publish({...})` (synchronous Redis, returns the number of
-  receivers). `user.is_online` is true while a session of the user is open.
-- To an anonymous client: publish to `get_anonymous_channel(token)` of
-  `bazis.contrib.ws.utils`.
-- To all user sessions: publish to `bazis.contrib.ws.COMMON_CHANNEL` only what every user
-  may know: `{"resource": "<JSON:API type>"}`, that a resource changed, without the id
-  (the format of bazis-front; the pages refetch with their own permissions). The ids, the
-  notifications and the data of an item go only to the users who may see it, with
-  `user.ws_publish(...)`. With `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true` the common
-  channel is public: enable it only if what the project publishes there is.
-- Pub/sub is not stored: a message published while the client is not subscribed is lost.
-- From a write (`hook_after_create`, `hook_after_update`, the relationships hooks, an
-  action of a transit: inside the transaction of the request) publish after the commit,
-  robustly: a client that refetched before the commit would read the old data, a rolled
-  back write must not notify, and Redis down must not fail a committed write (Django logs
-  the error). Not from `validate_item`: it may run more than once for one write. Bind the
-  values when the callback is made (`functools.partial`), not in a closure over a loop
-  variable, or every callback publishes the last one:
+- From the code of a write, use `bazis.contrib.ws.messages`; do not write a notifier of your
+  own (a Redis client, `on_commit`, the language, the format of bazis-front):
 
   ```python
-  from functools import partial
+  from django.utils.translation import gettext_lazy as _
 
-  for user in recipients:
-      transaction.on_commit(partial(user.ws_publish, message_for(user)), robust=True)
+  from bazis.contrib.ws.messages import notification, notify, publish_changed
+
+  # in hook_after_create / hook_after_update of the route, an action of a transit, save()
+  notify(
+      ticket.author,          # a user, an iterable of users (None and repeats skipped)
+      lambda user: notification(
+          _('New reply to ticket #%(number)s') % {'number': ticket.uniq_number},
+          reply.body,         # the text, optional
+          ticket,             # the item: "resource" and "id", optional
+      ),
+  )
+  publish_changed(ticket)     # {"resource": "support.ticket"} to every user session
   ```
 
-- A notification of bazis-front (`@/bazis/react/ws`) to the users who may see the item:
-  `{"action": "notification", "title": ..., "text": ..., "resource": "<JSON:API type>",
-  "id": "<id>"}`. Build its texts in the language of each user before `on_commit`, with
-  `str()` of the lazy strings inside `translation.override(user.language or
-  settings.LANGUAGE_CODE)` (`language` of `UserLanguageMixin` of bazis-users).
+  Both publish after the commit of the current transaction (at once outside a transaction),
+  robustly: a client that refetched before the commit would read the old data, a rolled
+  back write publishes nothing, and Redis down does not fail a committed write (Django logs
+  the error, the message is lost).
+- `notify(users, message)` calls `message(user)` for each user and serializes the result
+  inside `translation.override(user.language or settings.LANGUAGE_CODE)` (`language` of
+  `UserLanguageMixin` of bazis-users; without the field, LANGUAGE_CODE): lazy strings, the
+  `%` of a lazy string and translated fields read in the function are in the language of
+  the recipient. The function is called at once, inside `notify` (only the publishing waits
+  for the commit). The users need `UserWsMixin`;
+  choose the recipients yourself (only the users who may see the item; skip the author of
+  the change if he should not be told).
+- `notification(title, text=None, item=None)` is the notification of bazis-front
+  (`@/bazis/react/ws`): `{"action": "notification", "title", "text", "resource": "<JSON:API
+  type>", "id": "<id>"}`; with an item the frontend also refetches it. Any other dict can
+  be returned by the function: `user.ws_publish` delivers any JSON.
+- `publish_changed(item)` (an instance or a model with `JsonApiMixin`) publishes
+  `{"resource": "<JSON:API type>"}` on the common channel: the pages of bazis-front refetch
+  the resource with their own permissions. It carries no id: the common channel reaches
+  every user session (and every anonymous session with
+  `BS_BAZIS_WS_ANONYMOUS_COMMON_CHANNEL=true`, enable it only if that is public). The ids,
+  the notifications and the data of an item go only to the users who may see it.
+- Not from `validate_item`: it may run more than once for one write.
+- Low level: `user.ws_publish({...})` publishes at once (synchronous Redis, returns the
+  number of receivers; wrap it in `transaction.on_commit(partial(...), robust=True)` from a
+  write); `user.is_online` is true while a session of the user is open. To an anonymous
+  client: publish to `get_anonymous_channel(token)` of `bazis.contrib.ws.utils`.
+- Pub/sub is not stored: a message published while the client is not subscribed is lost.
 
 ## Rules
 

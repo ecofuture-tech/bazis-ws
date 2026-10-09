@@ -25,11 +25,16 @@ class User(UserWsMixin, JsonApiMixin, AbstractUser):
         verbose_name_plural = 'Users'
 
 # Register the WebSocket route in the router module of the project (BS_BAZIS_ROUTER_MODULE)
-from bazis.contrib.ws.ws import ws_route
 from bazis.core.routing import BazisRouter
 
 router = BazisRouter(prefix='/api/v1')
-router.routes.append(ws_route)  # appended as it is, the route keeps its path: /ws
+router.register('bazis.contrib.ws.router')  # the socket: /api/v1/ws
+
+# Notify after the commit, in the language of each user (in the hooks of a write)
+from bazis.contrib.ws.messages import notification, notify, publish_changed
+
+notify(ticket.author, lambda user: notification(_('Your ticket was answered'), reply.body, ticket))
+publish_changed(ticket)  # {"resource": "support.ticket"} to every user session
 ```
 
 ## Table of Contents
@@ -44,6 +49,7 @@ router.routes.append(ws_route)  # appended as it is, the route keeps its path: /
 - [Usage](#usage)
   - [Project Setup](#project-setup)
   - [Connecting to WebSocket](#connecting-to-websocket)
+  - [Notifications of bazis-front](#notifications-of-bazis-front)
   - [Sending Messages to Users](#sending-messages-to-users)
   - [Checking Online Status](#checking-online-status)
 - [WebSocket Protocol](#websocket-protocol)
@@ -133,7 +139,7 @@ WebSocket endpoint with authentication and session management support.
 **Key Features**:
 
 1. **JWT Token Authentication**:
-   - On connection: `ws://api.example.com/ws?token=<jwt_token>`
+   - On connection: `ws://api.example.com/api/v1/ws?token=<jwt_token>`
    - During session: sending `{"token": "<jwt_token>"}`
    - The token must be a valid, unexpired session token (`exp` and `sub` are required)
      of an active user.
@@ -256,21 +262,21 @@ class UserRouteSet(UserWsRouteSet):
 
 ```python
 # router.py
-from bazis.contrib.ws.ws import ws_route
 from bazis.core.routing import BazisRouter
 
 router = BazisRouter(prefix='/api/v1')
-router.routes.append(ws_route)  # appended as it is, the route keeps its path: /ws
+router.register('bazis.contrib.ws.router')  # the socket: /api/v1/ws
 
 router.register('myapp.router')
 ```
 
-`ws_route` is a Starlette `WebSocketRoute`, not a `BazisRouter` route: appended to the
-routes of the root router, it keeps its path `/ws` (the prefix of the router is not applied),
-and `bazis.core.app` includes it with the router. Tools import the router module, not the
-main module of the project: the contract export of bazis-front finds the socket there.
-Appending the route to `app.router.routes` in the main module also works at runtime, but
-the tools do not see it.
+The socket is routed under the prefix of the router, like the other routes:
+`/api/v1/ws` here. Tools import the router module, not the main module of the project: the
+contract export of bazis-front finds the socket (and its path) there. `ws_route`
+(`bazis.contrib.ws.ws`) remains for a project that routes the socket itself: appended as it
+is to the routes of the root router (`router.routes.append(ws_route)`), it keeps the path
+`/ws`. Appending it to `app.router.routes` in the main module also works at runtime, but the
+tools do not see it.
 
 ### Connecting to WebSocket
 
@@ -366,7 +372,7 @@ class WebSocketClient {
 }
 
 // Usage
-const ws = new WebSocketClient('ws://api.example.com/ws', jwtToken);
+const ws = new WebSocketClient('ws://api.example.com/api/v1/ws', jwtToken);
 ws.onData = (data) => {
   console.log('Processing data:', data);
   // Your processing logic
@@ -411,8 +417,52 @@ async def websocket_client(url, token):
             ping_task.cancel()
 
 # Usage
-asyncio.run(websocket_client('ws://api.example.com/ws', jwt_token))
+asyncio.run(websocket_client('ws://api.example.com/api/v1/ws', jwt_token))
 ```
+
+### Notifications of bazis-front
+
+`bazis.contrib.ws.messages` publishes the messages that the frontend of bazis-front reads
+(`@/bazis/react/ws`) from the code of a write, after the commit of the current transaction
+(at once outside a transaction) and robustly: a client refetching reads the committed data, a
+rolled back write publishes nothing, and Redis down does not fail a committed write.
+
+- `notify(users, message)` — publishes to the channel of each user (a user or an iterable;
+  `None` and repeated users are skipped) the message built for him by `message(user)`. The
+  message is built and serialized in the language of the user: `user.language`
+  (`UserLanguageMixin` of bazis-users) or `LANGUAGE_CODE`, so lazy strings are translated
+  per recipient.
+- `notification(title, text=None, item=None)` — the notification
+  `{"action": "notification", "title", "text", "resource", "id"}`, about an item (the
+  frontend shows it and refetches the item).
+- `publish_changed(item)` — `{"resource": "<JSON:API type>"}` on the common channel: every
+  user session refetches the resource with its own permissions. No id: the common channel
+  reaches every user.
+
+```python
+from django.utils.translation import gettext_lazy as _
+
+from bazis.contrib.ws.messages import notification, notify, publish_changed
+
+
+class ReplyRouteSet(...):
+    def hook_after_create(self, item):
+        super().hook_after_create(item)
+        ticket = item.ticket
+        notify(
+            ticket.author,
+            lambda user: notification(
+                _('New reply to ticket #%(number)s') % {'number': ticket.uniq_number},
+                item.body,
+                ticket,
+            ),
+        )
+        publish_changed(ticket)
+```
+
+Send notifications only to the users who may see the item. Publish from the hooks of the
+write (`hook_after_create`, `hook_after_update`, an action of a transit), not from
+`validate_item`, which may run more than once for one write.
 
 ### Sending Messages to Users
 
@@ -469,19 +519,9 @@ ids, the notifications and any data of an item only to the users who may see it,
 with `user.ws_publish(...)`.
 
 ```python
-import json
+from bazis.contrib.ws.messages import publish_changed
 
-from django.conf import settings
-
-from redis import Redis
-
-from bazis.contrib.ws import COMMON_CHANNEL
-
-redis = Redis.from_url(settings.CACHES['default']['LOCATION'])
-
-def resource_changed(resource: str):
-    """Tell all user sessions that a resource changed"""
-    redis.publish(COMMON_CHANNEL, json.dumps({'resource': resource}))
+publish_changed(item)  # after the commit: {"resource": "<JSON:API type of the item>"}
 ```
 
 Anonymous sessions do not receive the common channel: an anonymous token is generated by
@@ -681,7 +721,7 @@ class ChatClient extends WebSocketClient {
   }
 }
 
-const chat = new ChatClient('ws://api.example.com/ws', jwtToken);
+const chat = new ChatClient('ws://api.example.com/api/v1/ws', jwtToken);
 chat.connect();
 ```
 
