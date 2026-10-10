@@ -432,6 +432,10 @@ rolled back write publishes nothing, and Redis down does not fail a committed wr
   message is built and serialized in the language of the user: `user.language`
   (`UserLanguageMixin` of bazis-users) or `LANGUAGE_CODE`, so lazy strings are translated
   per recipient.
+  The message is not stored: a user who is not connected misses it. For notifications kept
+  for the user (an inbox with unread ones, read/unread, e-mail), use
+  [bazis-notify](https://github.com/ecofuture-tech/bazis-notify), which publishes through
+  this socket.
 - `notification(title, text=None, item=None)` — the notification
   `{"action": "notification", "title", "text", "resource", "id"}`, about an item (the
   frontend shows it and refetches the item).

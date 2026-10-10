@@ -109,7 +109,11 @@ bazis-async-background sends its task statuses through it.
   number of receivers; wrap it in `transaction.on_commit(partial(...), robust=True)` from a
   write); `user.is_online` is true while a session of the user is open. To an anonymous
   client: publish to `get_anonymous_channel(token)` of `bazis.contrib.ws.utils`.
-- Pub/sub is not stored: a message published while the client is not subscribed is lost.
+- The messages are live only: one published while the client is not subscribed is lost.
+  A notification the user must find later (offline, another device) is stored by
+  bazis-notify: its `notify(users, type, title, body, ...)` keeps a row per recipient with
+  an inbox API (unread, read, delete) and publishes the new ones through this socket
+  (`notification_created`, `notifications_changed`); this package stays the transport.
 
 ## Rules
 

@@ -12,7 +12,7 @@ solves = [
     "know whether a user is online",
 ]
 requires = ["bazis"]
-pairs_well = ["bazis-users", "bazis-async-background"]
+pairs_well = ["bazis-users", "bazis-notify", "bazis-async-background"]
 
 [[extension_points]]
 name = "UserWsMixin"
@@ -63,7 +63,7 @@ use_when = "the common channel of the user sessions (publish there with publish_
 text = "a channel built by hand from a client token can address a user channel: use get_anonymous_channel"
 
 [[pitfalls]]
-text = "published messages are delivered to clients as a JSON string in `data`, and are lost if nobody is subscribed"
+text = "published messages are delivered to clients as a JSON string in `data`, and are lost if nobody is subscribed: a notification the user must see later is stored by bazis-notify (notify of bazis.contrib.notify.service), which publishes through this socket"
 
 [[pitfalls]]
 text = "UserWsRouteSet imports bazis-users, which bazis-ws does not install"
