@@ -41,7 +41,9 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-    "bazis-test-utils>=2.3.0"
+    "bazis-test-utils>=2.3.0",
+    # the session tokens of jwt_build (bazis-ws reads them without importing bazis-users)
+    "bazis-users>=2.3.0",
 ]
 dev = [
     "ruff"

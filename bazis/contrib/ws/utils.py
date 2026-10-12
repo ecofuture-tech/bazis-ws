@@ -95,8 +95,9 @@ def get_anonymous_channel(token: str) -> str:
 
 def decode_user_token(token: str) -> dict:
     """
-    Decodes a user session token built by `jwt_build` of bazis-users. Raises UserError
-    for an expired or invalid token.
+    Decodes a user session token built by `jwt_build` of bazis-users, by the rules of its
+    `decode_token` (bazis-ws does not depend on bazis-users; the tests check the
+    contract). Raises UserError for an expired or invalid token.
     """
     algorithm = getattr(settings, 'BAZIS_JWT_SESSION_ALG', 'HS256')
     try:

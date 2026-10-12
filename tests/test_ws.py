@@ -410,6 +410,24 @@ def test_user_token_issued_in_the_future_accepted():
     assert decode_user_token(token)['sub'] == 'user'
 
 
+@pytest.mark.django_db
+def test_the_session_token_of_bazis_users_is_accepted(settings):
+    """
+    The contract with bazis-users, which bazis-ws does not import: a token of
+    `UserAbstract.jwt_build` is a user token, decoded with the algorithm of the project.
+    """
+    from types import SimpleNamespace
+
+    from bazis.contrib.users.models_abstract import UserAbstract
+    from bazis.contrib.ws.utils import decode_user_token, is_user_token
+
+    settings.SECRET_KEY = 'k' * 64
+    settings.BAZIS_JWT_SESSION_ALG = 'HS512'
+    token = UserAbstract.jwt_build(SimpleNamespace(username='user'), auth_type='password')
+    assert is_user_token(token)
+    assert decode_user_token(token)['sub'] == 'user'
+
+
 def test_redis_clients_of_closed_loops_are_dropped():
     """
     The asyncio Redis clients are kept per event loop; the clients of closed loops were
