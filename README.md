@@ -470,6 +470,14 @@ write (`hook_after_create`, `hook_after_update`, an action of a transit), not fr
 
 ### Sending Messages to Users
 
+`user.ws_publish(data)` is the low-level publishing: it publishes at once, whatever the
+transaction, to the sessions connected now. Use it outside a write (a task, code that runs
+after the commit). From the code of a write use `notify` and `publish_changed` (above),
+which publish after the commit: `ws_publish` inside a write notifies before the commit,
+also of a write that is rolled back. A message the user must see later, when he is not
+connected, is a stored notification of
+[bazis-notify](https://github.com/ecofuture-tech/bazis-notify), not a check of `is_online`.
+
 #### From Django View or API Endpoint
 
 ```python
@@ -683,21 +691,19 @@ def send_message(request):
     try:
         recipient = User.objects.get(id=recipient_id)
         
-        # Send message via WebSocket
-        if recipient.is_online:
-            recipient.ws_publish({
-                'type': 'chat_message',
-                'sender': {
-                    'id': str(request.user.id),
-                    'username': request.user.username
-                },
-                'message': message,
-                'timestamp': datetime.now().isoformat()
-            })
-            return JsonResponse({'status': 'sent'})
-        else:
-            # Save offline message
-            return JsonResponse({'status': 'saved_offline'})
+        # Send message via WebSocket (the view writes nothing: a view that saves the
+        # message publishes it after the commit, and stores what an offline recipient
+        # must see later with bazis-notify)
+        recipient.ws_publish({
+            'type': 'chat_message',
+            'sender': {
+                'id': str(request.user.id),
+                'username': request.user.username
+            },
+            'message': message,
+            'timestamp': datetime.now().isoformat()
+        })
+        return JsonResponse({'status': 'sent'})
             
     except User.DoesNotExist:
         return JsonResponse({'error': 'User not found'}, status=404)
