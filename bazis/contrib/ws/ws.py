@@ -148,7 +148,7 @@ class WsEndpoint(WebSocketEndpoint):
             asyncio.create_task(self.task_listen_queue(websocket)),
         ]
 
-    async def session_stop(self, websocket: WebSocket, code: int | None = None):
+    async def session_stop(self, websocket: WebSocket):
         tasks, self.active_tasks = self.active_tasks, []
         for task in tasks:
             task.cancel()
@@ -162,9 +162,6 @@ class WsEndpoint(WebSocketEndpoint):
         self.session_key = None
         self.channel_name = None
         self.receives_common = False
-
-        if code:
-            await websocket.close(code)
 
     async def _close(self, websocket: WebSocket, code: int):
         """
